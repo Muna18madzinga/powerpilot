@@ -14,7 +14,7 @@ def client():
 
 def test_state_has_every_panel(client):
     body = client.get("/api/state").json()
-    assert set(body) == {"meta", "fleet", "kpis", "sites", "recommendations", "log", "goals"}
+    assert set(body) == {"meta", "fleet", "kpis", "sites", "recommendations", "log", "goals", "jobs", "loadshedding"}
     assert len(body["sites"]) == 30
     assert body["meta"]["clock"]["running"] is False
 

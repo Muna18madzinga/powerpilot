@@ -86,6 +86,8 @@ def _state() -> dict:
         "recommendations": engine.recommendations_view(),
         "log": list(engine.log)[:60],
         "goals": [engine.goal_view(g) for g in engine.goals[:5]],
+        "jobs": engine.jobs_view(),
+        "loadshedding": engine.loadshedding_view(),
     }
 
 

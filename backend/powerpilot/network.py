@@ -102,6 +102,7 @@ class Job:
     kind: str
     depot_id: str
     created: int
+    depart: int
     arrive: int
     done: int
     km: float
@@ -163,8 +164,8 @@ class Network:
         depart = max(start, crews[crew])
         arrive = depart + travel
         busy = sum(1 for free_at in crews if free_at > step)
-        return DispatchPlan(depot, road_km, crew, depart, arrive, arrive + work,
-                            f"crew {crew + 1} of {len(crews)} ({busy} busy)")
+        crew_note = f"{len(crews) - busy} of {len(crews)} crews free" if busy < len(crews) else "all crews busy, it queues"
+        return DispatchPlan(depot, road_km, crew, depart, arrive, arrive + work, crew_note)
 
     def dispatch(self, site_index: int, kind: str, step: int, reason: str,
                  ref: str | None = None, delay_hours: float = 0.0, extra_work_hours: float = 0.0) -> Job:
@@ -178,7 +179,7 @@ class Network:
             km = plan.road_km * 2
             self.metrics.trips += 1
             self.metrics.trip_km += km
-        job = Job(job_id, site_index, kind, plan.depot.id, step, plan.arrive, plan.done, km, reason, ref)
+        job = Job(job_id, site_index, kind, plan.depot.id, step, plan.depart, plan.arrive, plan.done, km, reason, ref)
         self.jobs.append(job)
         return job
 

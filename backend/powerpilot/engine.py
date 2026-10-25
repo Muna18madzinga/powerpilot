@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import numpy as np
 
 from .config import SIM_START_ISO, STEP_HOURS, STEPS_PER_HOUR, Settings
-from .environment import World, hour_of_day, scheduled_off_hours_per_day
+from .environment import ZONE_BLOCK_STARTS, World, grid_scheduled_on, hour_of_day, scheduled_off_hours_per_day
 from .goals import Goal, parse_goal
 from .models import (
     TrainedModels,
@@ -88,6 +88,7 @@ class Engine:
         self.insights: list[Insight] = []
         self.baseline_soc: list[deque] = [deque(maxlen=48 * STEPS_PER_HOUR) for _ in self.sites]
         self._cooldown: dict[tuple[int | None, str], int] = {}
+        self._fuel_need: dict[int, float] = {}
         self._counter = 0
         self.set_autonomy(self.autonomy)
         self.tick()
@@ -129,6 +130,7 @@ class Engine:
     def set_stage(self, stage: int) -> None:
         stage = max(0, min(6, int(stage)))
         self.world.stage = stage
+        self._fuel_need.clear()
         hours = scheduled_off_hours_per_day(stage)
         self._note("schedule", f"Load-shedding moved to Stage {stage} ({hours:.0f} h off per day per zone)")
 
@@ -170,8 +172,9 @@ class Engine:
             projection = project_site(site, state, self.world, i, step, self.models.forecaster, settings)
             runway = None
             if state.tank_l > 0:
-                daily = max(projection.fuel_used_l, 1.0)
-                runway = state.fuel_reading / daily * 24
+                need = self._daily_fuel_need(i, step)
+                if need > 0.5:
+                    runway = state.fuel_reading / need * 24
             site_risk = float(risk[i])
             if state.status == "dark":
                 site_risk = 1.0
@@ -191,6 +194,17 @@ class Engine:
                 self._note("watch", f"Door alarm at {site.name} — no tamper pattern in telemetry, watching", i)
         return insights
 
+    def _daily_fuel_need(self, i: int, step: int) -> float:
+        """Litres the generator would burn over the next 24 h with a full tank,
+        refreshed hourly because it moves slowly."""
+        cached = self._fuel_need.get(i)
+        if cached is None or step % STEPS_PER_HOUR == 0:
+            state = self.pilot.states[i]
+            cached = project_site(self.sites[i], state, self.world, i, step, self.models.forecaster,
+                                  self.settings, fuel_l=state.tank_l).fuel_used_l
+            self._fuel_need[i] = cached
+        return cached
+
     def open_recommendations(self) -> list[Recommendation]:
         return [r for r in self.recommendations.values() if r.status in OPEN]
 
@@ -202,10 +216,11 @@ class Engine:
 
     def _dispatch_line(self, site_index: int, kind: str, step: int, delay_hours: float = 0.0) -> str:
         plan = self.pilot.plan_dispatch(site_index, kind, step, delay_hours)
-        eta = (plan.arrive - step) * STEP_HOURS
+        eta = _hours((plan.arrive - step) * STEP_HOURS)
         if kind == "security":
-            return f"{plan.responder.capitalize()} · ETA {_hours(eta)}"
-        return f"{plan.depot.name} · {plan.road_km:.0f} km by road · {plan.responder} · on site in {_hours(eta)}"
+            return f"The {plan.responder} can be on site in {eta}."
+        return (f"A crew from {plan.depot.name} drives {plan.road_km:.0f} km and is on site in {eta}. "
+                f"{plan.responder.capitalize()}.")
 
     def _recommend(self, step: int, site_index: int | None, kind: str, title: str, urgency: str,
                    monitor: str, diagnose: str, plan: str, benefit: str,
@@ -291,11 +306,15 @@ class Engine:
                 threshold = self.settings.field_ops.predictive_refuel_runway_hours
                 if runway < threshold or (state.status == "dark" and state.fuel_reading < 10):
                     urgency = "critical" if runway < 6 or state.status == "dark" else "high" if runway < 18 else "medium"
+                    daily_need = state.fuel_reading / runway * 24 if runway > 0 else 0.0
+                    diagnosis = ("The tank is empty. The generator cannot start when the battery runs low."
+                                 if state.fuel_reading <= self.settings.power.gen_min_fuel_l
+                                 else f"Diesel runs out in about {_hours(runway)}, before the next routine refuel round.")
                     self._recommend(
                         step, i, "refuel", "Refuel generator", urgency,
-                        f"Tank at {state.fuel_reading:.0f} L of {state.tank_l:.0f} L. "
-                        f"Forecast burn {insight.diesel_24h_l:.0f} L over the next 24 h at Stage {self.stage}.",
-                        f"Diesel runs out in about {_hours(runway)}, before the next routine refuel round.",
+                        f"Tank at {state.fuel_reading:.0f} L of {state.tank_l:.0f} L. The generator needs about "
+                        f"{daily_need:.0f} L a day at Stage {self.stage}.",
+                        diagnosis,
                         f"Top up to {state.tank_l:.0f} L now, while the crew can reach the site in daylight.",
                         f"Avoids an outage for {subs} subscribers",
                     )
@@ -591,6 +610,10 @@ class Engine:
                 {"step": self.step + k, "grid": not off}
                 for k, off in enumerate(expected_offgrid(self.world, i, self.step, 24 * STEPS_PER_HOUR), start=1)
             ]
+            trace: list[float] = []
+            project_site(site, state, self.world, i, self.step, self.models.forecaster, self.settings,
+                         horizon=24 * STEPS_PER_HOUR, trace=trace)
+            view["projected_soc"] = trace
             view["forecast_traffic"] = [
                 round(self.models.forecaster.predict(i, self.step + k), 3) for k in range(1, 24 * STEPS_PER_HOUR + 1)
             ]
@@ -636,6 +659,51 @@ class Engine:
             "recommendations": record.recommendation_ids,
             "created": self.time_at(record.created_step).isoformat(),
         }
+
+    def loadshedding_view(self, hours: int = 24) -> dict:
+        steps = range(self.step, self.step + hours * STEPS_PER_HOUR)
+        return {
+            "stage": self.stage,
+            "hours_off_per_day": scheduled_off_hours_per_day(self.stage),
+            "zones": [
+                {
+                    "zone": zone,
+                    "sites": [s.id for s in self.sites if s.zone == zone],
+                    "grid": [grid_scheduled_on(zone, k, self.stage) for k in steps],
+                }
+                for zone in ZONE_BLOCK_STARTS
+            ],
+        }
+
+    def jobs_view(self) -> list[dict]:
+        depots = {d.id: d for d in DEPOTS}
+        views = []
+        for job in self.pilot.jobs:
+            if job.completed:
+                continue
+            site = self.sites[job.site_index]
+            depot = depots[job.depot_id]
+            if self.step < job.depart:
+                phase, progress = "queued", 0.0
+            elif self.step < job.arrive:
+                phase = "en_route"
+                progress = (self.step - job.depart) / max(1, job.arrive - job.depart)
+            else:
+                phase, progress = "on_site", 1.0
+            views.append({
+                "id": job.id,
+                "kind": job.kind,
+                "site_id": site.id,
+                "site_name": site.name,
+                "depot_id": depot.id,
+                "from": [depot.lon, depot.lat],
+                "to": [site.lon, site.lat],
+                "phase": phase,
+                "progress": round(progress, 3),
+                "arrive": self.time_at(job.arrive).isoformat(),
+                "done": self.time_at(job.done).isoformat(),
+            })
+        return views
 
     def meta(self) -> dict:
         return {

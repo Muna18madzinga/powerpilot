@@ -62,14 +62,17 @@ class Projection:
 def project_site(site: Site, state: SiteState, world: World, index: int, step: int,
                  forecaster: DemandForecaster, settings: Settings,
                  horizon: int = FORECAST_STEPS, smart: bool | None = None,
-                 sleep_enabled: bool | None = None) -> Projection:
+                 sleep_enabled: bool | None = None, trace: list[float] | None = None,
+                 fuel_l: float | None = None) -> Projection:
     rules = settings.power
     sleep_rules = settings.sleep
     smart = state.smart_genset if smart is None else smart
     sleep_enabled = state.sleep_enabled if sleep_enabled is None else sleep_enabled
-    soc, fuel, gen_on, sleeping = state.soc_reading, state.fuel_reading, state.gen_on, state.sleeping
+    soc, gen_on, sleeping = state.soc_reading, state.gen_on, state.sleeping
+    fuel = state.fuel_reading if fuel_l is None else fuel_l
     dark = state.status == "dark"
     min_soc, fuel_used, gen_hours = soc, 0.0, 0.0
+    first_dark: float | None = None
     off_steps = expected_offgrid(world, index, step, horizon + STEPS_PER_DAY)
     next_on = _steps_to_next_on(off_steps)
 
@@ -102,9 +105,15 @@ def project_site(site: Site, state: SiteState, world: World, index: int, step: i
         gen_hours += STEP_HOURS if gen_on else 0.0
         min_soc = min(min_soc, soc)
         dark = not result.powered
-        if dark and state.status != "dark":
-            return Projection(ahead * STEP_HOURS, min_soc, fuel_used, gen_hours)
-    return Projection(0.0 if dark else None, min_soc, fuel_used, gen_hours)
+        if trace is not None:
+            trace.append(0.0 if dark else round(soc, 3))
+        if dark and first_dark is None and state.status != "dark":
+            first_dark = ahead * STEP_HOURS
+            if trace is None:
+                break
+    if first_dark is None and dark:
+        first_dark = 0.0
+    return Projection(first_dark, min_soc, fuel_used, gen_hours)
 
 
 FAULT_PERSISTENCE_STEPS = 3 * STEPS_PER_HOUR

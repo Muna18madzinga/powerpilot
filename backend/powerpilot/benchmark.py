@@ -48,7 +48,7 @@ def main() -> None:
         return
 
     base, pilot, saved = report["baseline"], report["powerpilot"], report["savings"]
-    print(f"\nPowerPilot benchmark · {args.days} days · Stage {args.stage} load-shedding · 30 Midlands sites (simulated)\n")
+    print(f"\nPowerPilot benchmark: {args.days} days, Stage {args.stage} load-shedding, 30 simulated Midlands sites\n")
     print(f"  {'':<28}{'Legacy ops':>12}{'PowerPilot':>12}")
     print(_row("Site outage hours", base["outage_site_hours"], pilot["outage_site_hours"], "h"))
     print(_row("Subscriber-hours lost", base["subscriber_hours_lost"] / 1000, pilot["subscriber_hours_lost"] / 1000, "k"))
@@ -60,7 +60,7 @@ def main() -> None:
     print(_row("Revenue lost", base["revenue_lost_usd"], pilot["revenue_lost_usd"], "USD"))
     print(_row("Total cost", base["total_cost_usd"], pilot["total_cost_usd"], "USD"))
     availability = report["availability"]
-    print(f"\n  Availability  legacy {availability['baseline']:.3%}  ·  PowerPilot {availability['powerpilot']:.3%}")
+    print(f"\n  Availability  legacy {availability['baseline']:.3%}, PowerPilot {availability['powerpilot']:.3%}")
     print(f"  Net saving    ${saved['cost_usd']:,.0f} over {args.days} days on 30 sites")
     for card in report["models"]:
         metrics = ", ".join(f"{k}={v}" for k, v in card["metrics"].items())
